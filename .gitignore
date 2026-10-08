@@ -1,0 +1,20 @@
+Set-Content -Path .gitignore -Value @"
+data/
+rendered_sheets/
+rendered_puzzles/
+papers/
+logs/*.json
+logs/*.csv
+
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+env/
+
+.DS_Store
+Thumbs.db
+desktop.ini
+"@
