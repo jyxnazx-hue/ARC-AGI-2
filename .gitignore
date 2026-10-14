@@ -1,19 +1,24 @@
 Set-Content -Path .gitignore -Value @"
+# Data & heavy puzzle assets
 data/
+temp_arc_clone/
 rendered_sheets/
 rendered_puzzles/
+renders/
 papers/
-logs/*.json
-logs/*.csv
+*.json
+!submission.json
 
+# Python & environment cache
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
-venv/
 .venv/
+venv/
 env/
 
+# OS metadata
 .DS_Store
 Thumbs.db
 desktop.ini
