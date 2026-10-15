@@ -1,13 +1,6 @@
-from typing import Any
-import math
-from typing import Optional, Tuple, List, Dict
-# pyrefly: ignore [missing-import]
 import torch
-# pyrefly: ignore [missing-import]
 import torch.nn as nn
-# pyrefly: ignore [missing-import]
 import torch.nn.functional as F
-
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -19,150 +12,93 @@ class RMSNorm(nn.Module):
         variance = x.pow(2).mean(-1, keepdim=True)
         return x * torch.rsqrt(variance + self.eps) * self.weight
 
-
-class SwiGLUFFN(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-
-class TransformerBlock(nn.Module):
+class RecurrentTransformerBlock(nn.Module):
     def __init__(self, d_model: int = 512, n_heads: int = 8, ffn_dim: int = 1024):
         super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
         self.norm1 = RMSNorm(d_model)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=n_heads,
-            batch_first=True
-        )
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, d_model, bias=False)
+        self.v_proj = nn.Linear(d_model, d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
         self.norm2 = RMSNorm(d_model)
-        self.ffn = SwiGLUFFN(d_model, ffn_dim)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        norm_x = self.norm1(x)
-        kv = norm_x if context is None else self.norm1(context)
-        attn_out, _ = self.attn(
-            query=norm_x,
-            key=kv,
-            value=kv,
-            key_padding_mask=attn_mask
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, ffn_dim),
+            nn.SiLU(),
+            nn.Linear(ffn_dim, d_model)
         )
-        x = x + attn_out
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
+        B, S, _ = x.shape
+        normed_q = self.norm1(x)
+        normed_kv = self.norm1(context) if context is not None else normed_q
+        S_kv = normed_kv.shape[1]
+
+        q = self.q_proj(normed_q).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(normed_kv).view(B, S_kv, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(normed_kv).view(B, S_kv, self.n_heads, self.head_dim).transpose(1, 2)
+
+        attn_out = F.scaled_dot_product_attention(q, k, v)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, self.d_model)
+        x = x + self.out_proj(attn_out)
         x = x + self.ffn(self.norm2(x))
         return x
-
-
-class SharedRecursiveNet(nn.Module):
-    def __init__(self, d_model: int = 512, n_heads: int = 8, n_layers: int = 2, ffn_dim: int = 1024):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            TransformerBlock(d_model=d_model, n_heads=n_heads, ffn_dim=ffn_dim)
-            for _ in range(n_layers)
-        ])
-
-    def forward(
-        self,
-        state: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-        key_padding_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        out = state
-        for layer in self.layers:
-            out = layer(out, context=context, attn_mask=key_padding_mask)
-        return out
-
 
 class TRMModel(nn.Module):
     def __init__(
         self,
-        vocab_size: int = 43,
+        vocab_size: int = 12,
         d_model: int = 512,
         n_heads: int = 8,
         n_layers: int = 2,
         ffn_dim: int = 1024,
-        inner_steps_k: int = 4,
-        outer_steps_t: int = 3
+        inner_steps_k: int = 2,
+        outer_steps_t: int = 2
     ):
         super().__init__()
         self.d_model = d_model
         self.inner_steps_k = inner_steps_k
         self.outer_steps_t = outer_steps_t
+        self.vocab_size = vocab_size
 
         self.token_embeddings = nn.Embedding(vocab_size, d_model)
-        self.shared_net = SharedRecursiveNet(
-            d_model=d_model,
-            n_heads=n_heads,
-            n_layers=n_layers,
-            ffn_dim=ffn_dim
-        )
-        self.decoder_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.row_embed = nn.Embedding(30, d_model)
+        self.col_embed = nn.Embedding(30, d_model)
 
-    def count_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        rows = torch.arange(30).unsqueeze(1).expand(30, 30).flatten()
+        cols = torch.arange(30).unsqueeze(0).expand(30, 30).flatten()
+        self.register_buffer("grid_rows", rows)
+        self.register_buffer("grid_cols", cols)
 
-    def forward_with_supervision(
-        self,
-        input_embeddings: torch.Tensor,
-        labels: Optional[torch.Tensor] = None,
-        key_padding_mask: Optional[torch.Tensor] = None,
-        tbptt_window: int = 4
-    ) -> Dict[str, Any]:
-        batch_size, seq_len, _ = input_embeddings.shape
-        device = input_embeddings.device
+        self.layers = nn.ModuleList([
+            RecurrentTransformerBlock(d_model, n_heads, ffn_dim) for _ in range(n_layers)
+        ])
+        self.final_norm = RMSNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
 
-        z_H = torch.randn(batch_size, seq_len, self.d_model, device=device) * 0.02
-        z_L = torch.randn(batch_size, seq_len, self.d_model, device=device) * 0.02
+    def get_canvas_embeddings(self, canvas_tokens: torch.Tensor) -> torch.Tensor:
+        tok_embeds = self.token_embeddings(canvas_tokens)
+        pos_embeds = self.row_embed(self.grid_rows) + self.col_embed(self.grid_cols)
+        return tok_embeds + pos_embeds.unsqueeze(0)
 
-        step_losses = []
-        step_logits = []
+    def forward_recursive(self, input_embeddings: torch.Tensor, tbptt_window: int = 2) -> dict:
+        z_H = torch.zeros_like(input_embeddings)
+        z_L = torch.zeros_like(input_embeddings)
 
-        for step in range(self.outer_steps_t):
-            # Truncated backprop boundary: detach latent states to bound graph memory
-            if step > 0 and step % tbptt_window == 0:
+        for t in range(self.outer_steps_t):
+            for k in range(self.inner_steps_k):
+                ctx = z_H + input_embeddings
+                for layer in self.layers:
+                    z_L = layer(z_L, context=ctx)
+            for layer in self.layers:
+                z_H = layer(z_H, context=z_L)
+
+            if (t + 1) % tbptt_window == 0 and (t + 1) < self.outer_steps_t:
                 z_H = z_H.detach()
                 z_L = z_L.detach()
 
-            for _ in range(self.inner_steps_k):
-                z_L = self.shared_net(
-                    state=z_L,
-                    context=z_H + input_embeddings,
-                    key_padding_mask=key_padding_mask
-                )
-            z_H = self.shared_net(
-                state=z_H,
-                context=z_L,
-                key_padding_mask=key_padding_mask
-            )
-
-            logits = self.decoder_head(z_H)
-            step_logits.append(logits)
-
-            if labels is not None:
-                # Mask prompt tokens and pad tokens using ignore_index=-100
-                loss_step = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
-                    labels.view(-1),
-                    ignore_index=-100
-                )
-                step_losses.append(loss_step)
-
-        total_loss = torch.stack(step_losses).mean() if step_losses else None
-
-        return {
-            "total_loss": total_loss,
-            "step_losses": step_losses,
-            "final_logits": step_logits[-1],
-            "all_logits": step_logits,
-            "z_H": z_H,
-            "z_L": z_L
-        }
+        normed = self.final_norm(z_H)
+        logits = self.head(normed)
+        return {"final_logits": logits}

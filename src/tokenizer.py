@@ -1,116 +1,42 @@
-from __future__ import annotations
-from typing import List, Dict, Tuple, Optional, Any
-# pyrefly: ignore [missing-import]
 import numpy as np
-
+from typing import Tuple
 
 class ARCTokenizer:
+    PAD_TOKEN = 0
+    EOS_TOKEN = 1
+    COLOR_OFFSET = 2
+    VOCAB_SIZE = 12
+    CANVAS_SIZE = 30
+    CANVAS_TOKENS = 900
+
     def __init__(self):
-        tokens = [
-            "<pad>", "<bos>", "<eos>", "<unk>", "<sep>",
-            "<start_example>", "<end_example>",
-            "<start_input>", "<end_input>",
-            "<start_output>", "<end_output>",
-            "<start_row>", "<end_row>",
-            "<row_by_row>", "<snake>",
-            "<task_solve>", "<task_denoise>"
-        ]
-        tokens += [f"<c{i}>" for i in range(10)]
-        tokens += [f"<puzzle_{i}>" for i in range(16)]
+        self.vocab_size = self.VOCAB_SIZE
 
-        self.token_to_id: Dict[str, int] = {tok: idx for idx, tok in enumerate(tokens)}
-        self.id_to_token: Dict[int, str] = {idx: tok for idx, tok in enumerate(tokens)}
-
-        self.pad_token_id = self.token_to_id["<pad>"]
-        self.bos_token_id = self.token_to_id["<bos>"]
-        self.eos_token_id = self.token_to_id["<eos>"]
-        self.unk_token_id = self.token_to_id["<unk>"]
-
-    @property
-    def vocab_size(self) -> int:
-        return len(self.token_to_id)
-
-    def encode(self, tokens: List[str]) -> List[int]:
-        return [self.token_to_id.get(t, self.unk_token_id) for t in tokens]
-
-    def decode(self, ids: List[int]) -> List[str]:
-        return [self.id_to_token.get(i, "<unk>") for i in ids]
-
-    def grid_to_tokens(self, grid: np.ndarray, mode: str = "row_by_row") -> List[str]:
-        tokens = [f"<{mode}>"]
+    def grid_to_canvas(self, grid: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         h, w = grid.shape
-        for r in range(h):
-            tokens.append("<start_row>")
-            cols = range(w) if (mode == "row_by_row" or r % 2 == 0) else range(w - 1, -1, -1)
-            for c in cols:
-                tokens.append(f"<c{int(grid[r, c])}>")
-            tokens.append("<end_row>")
-        return tokens
+        canvas_2d = np.full((self.CANVAS_SIZE, self.CANVAS_SIZE), self.PAD_TOKEN, dtype=np.int64)
+        loss_mask_2d = np.zeros((self.CANVAS_SIZE, self.CANVAS_SIZE), dtype=np.float32)
 
-    def tokens_to_grid(self, tokens: List[str]) -> np.ndarray:
-        mode = "row_by_row"
-        if "<snake>" in tokens:
-            mode = "snake"
+        canvas_2d[:h, :w] = grid + self.COLOR_OFFSET
+        loss_mask_2d[:h, :w] = 1.0
 
-        rows = []
-        curr_row = []
-        inside_row = False
+        if h < self.CANVAS_SIZE:
+            canvas_2d[h, :w] = self.EOS_TOKEN
+        if w < self.CANVAS_SIZE:
+            canvas_2d[:h, w] = self.EOS_TOKEN
 
-        for t in tokens:
-            if t == "<start_row>":
-                curr_row = []
-                inside_row = True
-            elif t == "<end_row>":
-                if inside_row:
-                    rows.append(curr_row)
-                    inside_row = False
-            elif inside_row and t.startswith("<c") and t[2:-1].isdigit():
-                curr_row.append(int(t[2:-1]))
+        return canvas_2d.flatten(), loss_mask_2d.flatten()
 
-        if not rows:
-            return np.zeros((0, 0), dtype=np.int8)
+    def canvas_to_grid(self, canvas: np.ndarray, h: int = None, w: int = None) -> np.ndarray:
+        arr = np.array(canvas, dtype=np.int64).reshape(self.CANVAS_SIZE, self.CANVAS_SIZE)
+        if h is not None and w is not None:
+            grid_tokens = arr[:h, :w]
+            return np.clip(grid_tokens - self.COLOR_OFFSET, 0, 9)
 
-        grid = np.zeros((len(rows), len(rows[0])), dtype=np.int8)
-        for r_idx, r_data in enumerate(rows):
-            if mode == "snake" and r_idx % 2 == 1:
-                r_data = r_data[::-1]
-            grid[r_idx, :] = r_data
+        valid = (arr >= self.COLOR_OFFSET) & (arr <= 11)
+        rows, cols = np.where(valid)
+        if len(rows) == 0 or len(cols) == 0:
+            return np.zeros((1, 1), dtype=np.int64)
 
-        return grid
-
-    def serialize_task(
-        self,
-        task: Dict[str, Any],
-        test_idx: int = 0,
-        mode: str = "row_by_row",
-        include_target: bool = False
-    ) -> Tuple[List[str], Optional[List[str]]]:
-        tokens = ["<bos>", f"<{mode}>"]
-
-        for inp, out in task["train"]:
-            tokens.append("<start_example>")
-            tokens.append("<start_input>")
-            tokens.extend(self.grid_to_tokens(inp, mode=mode))
-            tokens.append("<end_input>")
-            tokens.append("<start_output>")
-            tokens.extend(self.grid_to_tokens(out, mode=mode))
-            tokens.append("<end_output>")
-            tokens.append("<end_example>")
-
-        test_inp, test_out = task["test"][test_idx]
-        tokens.append("<start_example>")
-        tokens.append("<start_input>")
-        tokens.extend(self.grid_to_tokens(test_inp, mode=mode))
-        tokens.append("<end_input>")
-        tokens.append("<start_output>")
-
-        target_tokens = None
-        if include_target and test_out is not None:
-            target_tokens = self.grid_to_tokens(test_out, mode=mode) + ["<end_output>", "<end_example>", "<eos>"]
-        elif not include_target:
-            tokens.append("<eos>")
-
-        return tokens, target_tokens
-
-    def deserialize_task_output(self, tokens: List[str]) -> np.ndarray:
-        return self.tokens_to_grid(tokens)
+        max_r, max_c = rows.max() + 1, cols.max() + 1
+        return np.clip(arr[:max_r, :max_c] - self.COLOR_OFFSET, 0, 9)
