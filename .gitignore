@@ -1,6 +1,27 @@
-checkpoints/
+﻿# Data & heavy puzzle assets
 data/
+temp_arc_clone/
+rendered_sheets/
+rendered_puzzles/
+renders/
+papers/
+*.json
+!submission.json
+
+# Model checkpoints — keep out of git, use Kaggle Datasets / HF Hub
+checkpoints/
 *.pt
+
+# Python & environment cache
 __pycache__/
-*.pyc
-*.zip
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
