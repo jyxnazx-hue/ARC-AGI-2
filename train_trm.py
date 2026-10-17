@@ -15,6 +15,7 @@ Features:
     * Holdout pass@1 eval every N steps (single forward, argmax over color tokens)
     * Checkpoint save/load (model + optimizer + scheduler + EMA + step)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -93,8 +94,12 @@ class Config:
     # Logging / checkpointing
     log_every: int = 10
     eval_every: int = 500
-    ckpt_every: int = 1000
+    ckpt_every: int = 250          
+    milestone_every: int = 500     
     n_eval_tasks: int = 50
+
+    time_budget_min: float = 240.0 
+    time_buffer_min: float = 5.0    
 
     device: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
 
@@ -107,12 +112,24 @@ SMOKE = Config(
     d_model=32, n_heads=2, n_layers=1, ffn_dim=64,
     inner_steps_k=2, outer_steps_t=2,
     n_puzzles=16, puzzle_len=4,
-    total_steps=3, warmup_steps=1, log_every=1, eval_every=2, ckpt_every=3,
+    total_steps=3, warmup_steps=1, log_every=1, eval_every=2,
+    ckpt_every=3, milestone_every=3,
     batch_size=2, n_eval_tasks=3,
+    time_budget_min=5.0, time_buffer_min=0.5,
     ckpt_dir=Path("checkpoints_smoke"),
 )
 
-REAL = Config(name="real")  
+REAL = Config(
+    name="real",
+    batch_size=2,               
+    grad_accum_steps=8,
+    total_steps=1500,         
+    ckpt_every=100,             
+    milestone_every=250,
+    dtype="fp32",               
+    time_budget_min=480.0,     
+    n_eval_tasks=50,
+)
 
 
 # Utilities
@@ -328,6 +345,10 @@ class Trainer:
         )
         self._dl_iter = None
 
+        self.start_time: Optional[float] = None
+        self.step_at_start: int = 0
+        self.best_holdout: float = -1.0
+
         self.cfg.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     def _next_batch(self):
@@ -410,46 +431,113 @@ class Trainer:
         self.ema.load_state_dict(ckpt["ema"])
         self.step = ckpt["step"]
 
+    def _estimate_eta_sec(self) -> Optional[float]:
+        if self.start_time is None:
+            return None
+        steps_done = self.step - self.step_at_start
+        if steps_done < 5:
+            return None
+        elapsed = time.time() - self.start_time
+        sec_per_step = elapsed / steps_done
+        remaining = max(0, self.cfg.total_steps - self.step)
+        return remaining * sec_per_step
+
+    @staticmethod
+    def _fmt_duration(seconds: float) -> str:
+        s = int(seconds)
+        h, r = divmod(s, 3600)
+        m, s = divmod(r, 60)
+        return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
+
+    def _budget_exceeded(self) -> bool:
+        if self.start_time is None or self.cfg.time_budget_min <= 0:
+            return False
+        elapsed_min = (time.time() - self.start_time) / 60.0
+        remaining_min = self.cfg.time_budget_min - elapsed_min
+        if remaining_min < self.cfg.time_buffer_min:
+            return True
+        eta = self._estimate_eta_sec()
+        if eta is not None and eta / 60.0 > (remaining_min - self.cfg.time_buffer_min):
+            return True
+        return False
+
+    def _checkpoint(self, tag: str, log: bool = True) -> Path:
+        p = self.save_checkpoint(tag)
+        if log:
+            print(f"[ckpt] saved {p}")
+        return p
+
     def train(self) -> None:
         cfg = self.cfg
+        self.start_time = time.time()
+        self.step_at_start = self.step
+
         print(f"[train] config={cfg.name}  device={cfg.device}  "
               f"params={count_parameters(self.model):,}")
         print(f"[train] train rows={len(self.train_ds):,}  "
               f"holdout tasks={len(self.holdout_ds) if self.holdout_ds else 0}  "
-              f"steps={cfg.total_steps}")
+              f"steps={cfg.total_steps}  budget={cfg.time_budget_min:.0f}min")
 
-        t0 = time.time()
         recent_losses: List[float] = []
+        stopped_reason = "completed"
 
-        while self.step < cfg.total_steps:
-            stats = self.train_step()
-            recent_losses.append(stats["loss"])
+        try:
+            while self.step < cfg.total_steps:
+                stats = self.train_step()
+                recent_losses.append(stats["loss"])
 
-            if self.step % cfg.log_every == 0:
-                avg = sum(recent_losses) / len(recent_losses)
-                recent_losses = []
-                elapsed = time.time() - t0
-                print(
-                    f"[step {self.step:5d}/{cfg.total_steps}] "
-                    f"loss={avg:.4f}  "
-                    f"lr_model={stats['lr_model']:.2e}  "
-                    f"lr_puzzle={stats['lr_puzzle']:.2e}  "
-                    f"elapsed={elapsed:.1f}s"
-                )
+                if self.step % cfg.log_every == 0:
+                    avg = sum(recent_losses) / len(recent_losses)
+                    recent_losses = []
+                    elapsed = time.time() - self.start_time
+                    eta = self._estimate_eta_sec()
+                    eta_str = self._fmt_duration(eta) if eta else "?"
+                    print(
+                        f"[step {self.step:5d}/{cfg.total_steps}] "
+                        f"loss={avg:.4f}  "
+                        f"lr_model={stats['lr_model']:.2e}  "
+                        f"lr_puzzle={stats['lr_puzzle']:.2e}  "
+                        f"elapsed={self._fmt_duration(elapsed)}  "
+                        f"eta={eta_str}"
+                    )
 
-            if self.holdout_ds and self.step % cfg.eval_every == 0:
-                acc = evaluate_pass_at_1(
-                    self.model, self.holdout_ds, cfg, cfg.n_eval_tasks
-                )
-                print(f"[eval  step {self.step}] holdout pass@1 = {acc:.3f}")
+                if self.step % cfg.ckpt_every == 0:
+                    self._checkpoint("latest")
+                if self.step % cfg.milestone_every == 0:
+                    self._checkpoint(f"step{self.step}")
 
-            if self.step % cfg.ckpt_every == 0:
-                p = self.save_checkpoint(f"step{self.step}")
-                print(f"[ckpt] saved {p}")
+                if self.holdout_ds and self.step % cfg.eval_every == 0:
+                    acc = evaluate_pass_at_1(
+                        self.model, self.holdout_ds, cfg, cfg.n_eval_tasks
+                    )
+                    marker = ""
+                    if acc > self.best_holdout:
+                        self.best_holdout = acc
+                        self._checkpoint("best", log=False)
+                        marker = "  (saved best.pt)"
+                    print(f"[eval  step {self.step}] holdout pass@1 = {acc:.3f}{marker}")
 
-        # Final checkpoint
-        p = self.save_checkpoint("final")
-        print(f"[done] saved {p}  total_time={time.time() - t0:.1f}s")
+                if self._budget_exceeded():
+                    stopped_reason = "time_budget"
+                    print(f"[stop] time budget reached at step {self.step} "
+                          f"({self._fmt_duration(time.time() - self.start_time)})")
+                    break
+
+        except KeyboardInterrupt:
+            stopped_reason = "interrupted"
+            print(f"\n[stop] KeyboardInterrupt at step {self.step}")
+            self._checkpoint("interrupt")
+        except Exception as e:
+            stopped_reason = f"error: {type(e).__name__}"
+            print(f"\n[stop] exception at step {self.step}: {e}")
+            self._checkpoint("interrupt")
+            raise
+
+        self._checkpoint("final")
+        total = time.time() - self.start_time
+        print(f"[done] reason={stopped_reason}  steps={self.step}  "
+              f"total_time={self._fmt_duration(total)}  "
+              f"best_holdout={self.best_holdout:.3f}")
 
 # Entry point
 
@@ -458,11 +546,17 @@ def main() -> None:
     ap.add_argument("--config", choices=["smoke", "real"], default="smoke")
     ap.add_argument("--data-root", type=str, default=None)
     ap.add_argument("--resume", type=str, default=None)
+    ap.add_argument("--total-steps", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=None)
     args = ap.parse_args()
 
     cfg = SMOKE if args.config == "smoke" else REAL
     if args.data_root:
         cfg.data_root = Path(args.data_root)
+    if args.total_steps is not None:
+        cfg.total_steps = args.total_steps
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
 
     trainer = Trainer(cfg)
     if args.resume:
