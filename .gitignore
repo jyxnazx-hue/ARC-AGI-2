@@ -1,18 +1,12 @@
-﻿# Data & heavy puzzle assets
-data/
-temp_arc_clone/
-rendered_sheets/
-rendered_puzzles/
-renders/
-papers/
-*.json
-!submission.json
+﻿data/synthetic/
 
-# Model checkpoints — keep out of git, use Kaggle Datasets / HF Hub
+/submission.json
+/submission_*.json
+
 checkpoints/
 *.pt
+*.pth
 
-# Python & environment cache
 __pycache__/
 *.py[cod]
 *$py.class
@@ -21,7 +15,12 @@ __pycache__/
 venv/
 env/
 
-# OS metadata
 .DS_Store
 Thumbs.db
 desktop.ini
+
+rendered_sheets/
+rendered_puzzles/
+renders/
+papers/
+temp_arc_clone/
