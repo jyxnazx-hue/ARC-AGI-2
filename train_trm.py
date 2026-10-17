@@ -1,5 +1,4 @@
 """
-
 training loop for TRM on ARC-AGI-2.
 
 Run modes:
