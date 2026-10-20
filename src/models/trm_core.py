@@ -1,3 +1,4 @@
+from math import tau
 from typing import Any, Optional, Dict
 # pyrefly: ignore[missing-import]
 import torch
@@ -146,6 +147,12 @@ class TRMModel(nn.Module):
         )
         self.decoder_head = nn.Linear(d_model, vocab_size, bias=False)
 
+        self.tau_embedding = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model)
+        )
+
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -190,8 +197,28 @@ class TRMModel(nn.Module):
         loss_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         tbptt_window: int = 4,
+        tau: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         x = self._embed_inputs(token_ids, puzzle_idx)
+
+        if tau is not None:
+            tau_tensor = tau.float().unsqueeze(-1)
+            tau_emb = self.tau_embedding(tau_tensor).unsqueeze(1) # [B, 1, d_model]
+            x = x + tau_emb 
+
+        key_padding_mask = None
+        if attention_mask is not None:
+            key_padding_mask = ~attention_mask.bool()
+
+        if labels is None and loss_mask is not None:
+            labels = torch.where(loss_mask.bool(), token_ids, -100)
+
+        return self.forward_with_supervision(
+            input_embeddings=x,
+            labels=labels,
+            key_padding_mask=key_padding_mask,
+            tbptt_window=tbptt_window,
+        )
 
         key_padding_mask = None
         if attention_mask is not None:
