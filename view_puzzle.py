@@ -14,7 +14,7 @@ def inspect_task(task_path: str, save_png: bool = True):
         task_data = json.load(f)
 
     task_id = task_file.stem
-    print(f"\n================ TASK: {task_id} ================\n")
+    print(f"\n TASK: {task_id} \n")
 
     # 1. Print and render Demonstration (Train) Pairs
     train_pairs = task_data.get("train", [])
@@ -51,6 +51,5 @@ def inspect_task(task_path: str, save_png: bool = True):
         print(f"\n[Saved PNGs to rendered_puzzles/{task_id}/]")
 
 if __name__ == "__main__":
-    # Default to first puzzle in build if none provided
     sample_file = sys.argv[1] if len(sys.argv) > 1 else str(next(Path("data/build").glob("*.json")))
     inspect_task(sample_file)
