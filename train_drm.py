@@ -19,12 +19,10 @@ class DRMTrainer(Trainer):
             batch = self._next_batch()
             B = batch["output_canvases"].shape[0]
             
-            # DRM noise injection
             tau = torch.rand(B, device=self.cfg.device)
             
             clean_outputs = batch["output_canvases"].clone()
             
-            # Corrupt the inputs
             corrupted_outputs = batch["output_canvases"].clone()
             for i in range(B):
                 corrupted_outputs[i, -1] = corrupt_canvas(
@@ -34,7 +32,6 @@ class DRMTrainer(Trainer):
                 )
             batch["output_canvases"] = corrupted_outputs
             
-            # Build sequence 
             token_ids, attention, loss_mask = ds.build_sequence(batch, puzzle_len=self.cfg.puzzle_len)
             
             clean_batch = {**batch, "output_canvases": clean_outputs}
@@ -46,18 +43,20 @@ class DRMTrainer(Trainer):
             clean_token_ids = clean_token_ids.to(self.cfg.device)
             puzzle_idx = batch["puzzle_idx"].to(self.cfg.device)
 
-            # Forward pass with tau
             out = self.model(
                 token_ids, puzzle_idx,
                 attention_mask=attention, loss_mask=loss_mask,
                 tbptt_window=self.cfg.tbptt_window,
-                tau=tau, 
+                tau=tau,
             )
             
             logits = out["final_logits"]
+            
+            masked_targets = torch.where(loss_mask, clean_token_ids, -100)
+            
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
-                clean_token_ids.view(-1),
+                masked_targets.view(-1),
                 ignore_index=-100
             )
 
