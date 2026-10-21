@@ -10,7 +10,7 @@ from train_trm import Config, build_model
 
 DATA_ROOT = Path("data")
 HOLDOUT_DIR = DATA_ROOT / "holdout"
-CKPT_PATH = Path("checkpoints/trm_final.pt")
+CKPT_PATH = Path("checkpoints/trm_step1000.pt") 
 
 def main():
     cfg = Config()
@@ -24,21 +24,20 @@ def main():
     ckpt = torch.load(CKPT_PATH, map_location=cfg.device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     model.eval()
+    print(f"Loaded DRM model from step {ckpt.get('step', '?')}")
 
-    # JUST 1 TASK
-    paths = sorted(HOLDOUT_DIR.glob("*.json"))[:1]
+    paths = sorted(HOLDOUT_DIR.glob("*.json"))[:1] 
     task = json.loads(paths[0].read_text())
     print(f"Evaluating 1 holdout task: {paths[0].stem}...")
 
-    # FASTEST POSSIBLE INFERENCE: 1 attempt, 1 tau step (argmax)
-    a1 = inf.predict_one_attempt(
+    a1, _ = inf.predict_two_attempts(
         model=model, 
         task=task, 
         puzzle_idx=model.n_puzzles, 
         n_train_pairs=cfg.n_train_pairs, 
         puzzle_len=cfg.puzzle_len,
         device=cfg.device,
-        tau_schedule=[1.0] # Just predict once!
+        tau_schedule=[1.0, 0.5, 0.0] 
     )
     
     truth = np.array(task["test"][0]["output"])
@@ -51,9 +50,9 @@ def main():
     
     if pred.shape == truth.shape:
         acc = np.sum(pred == truth) / truth.size
-        print(f"\n✅ Pixel Accuracy: {acc:.1%}")
+        print(f"\n Pixel Accuracy: {acc:.1%}")
     else:
-        print("\n❌ Shape mismatch.")
+        print("\n Shape mismatch.")
 
 if __name__ == "__main__":
     main()

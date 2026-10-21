@@ -150,7 +150,8 @@ def predict_one_attempt(
         attention = attention.to(device)
         pidx = batch["puzzle_idx"].to(device)
 
-        out = model(token_ids, pidx, attention_mask=attention, loss_mask=None)
+        tau_tensor = torch.tensor([tau], device=device)
+        out = model(token_ids, pidx, attention_mask=attention, loss_mask=None, tau=tau_tensor)
         test_logits = out["final_logits"][0, -tk.CANVAS_SIZE:]     # [900, 12]
         color_logits = test_logits[..., 2:12]                      # [900, 10]
         probs = F.softmax(color_logits, dim=-1)                    # [900, 10]
