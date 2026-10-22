@@ -53,10 +53,16 @@ class DRMTrainer(Trainer):
             logits = out["final_logits"]
             
             masked_targets = torch.where(loss_mask, clean_token_ids, -100)
+
+            weights = torch.ones(12, device=self.cfg.device)
+            weights[0] = 0.0  # PAD
+            weights[1] = 0.0  # MASK
+            weights[2:] = 10.0 # Weights for colors 0-9 
             
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 masked_targets.view(-1),
+                weight=weights,
                 ignore_index=-100
             )
 
