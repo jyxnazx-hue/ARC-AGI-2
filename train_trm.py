@@ -70,7 +70,7 @@ class Config:
     # Optim
     lr_model: float = 1e-4
     lr_puzzle: float = 1e-3
-    weight_decay: float = 0.01
+    weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
     grad_clip: float = 1.0
@@ -128,6 +128,9 @@ REAL = Config(
     dtype="fp32",               
     time_budget_min=480.0,     
     n_eval_tasks=50,
+    lr_model=5e-5,      
+    lr_puzzle=5e-4,      
+    warmup_steps=500,    
 )
 
 
