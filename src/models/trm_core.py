@@ -244,8 +244,8 @@ class TRMModel(nn.Module):
         batch_size, seq_len, _ = input_embeddings.shape
         device = input_embeddings.device
 
-        z_H = torch.randn(batch_size, seq_len, self.d_model, device=device) * 0.02
-        z_L = torch.randn(batch_size, seq_len, self.d_model, device=device) * 0.02
+        z_H = input_embeddings.clone()
+        z_L = input_embeddings.clone()
 
         step_losses = []
         step_logits = []
