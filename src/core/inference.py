@@ -88,6 +88,7 @@ def predict_one_attempt(
     puzzle_len: int,
     device: str = "cpu",
     tau_schedule: Sequence[float] = TAU_SCHEDULE,
+    override_puzzle_emb: Optional[torch.Tensor] = None,
 ) -> List[List[int]]:
     """
     Run one inference pass on `task`. Returns a list-of-lists grid.
@@ -151,7 +152,13 @@ def predict_one_attempt(
         pidx = batch["puzzle_idx"].to(device)
 
         tau_tensor = torch.tensor([tau], device=device)
-        out = model(token_ids, pidx, attention_mask=attention, loss_mask=None, tau=tau_tensor)
+        out = model(
+        token_ids, pidx, 
+        attention_mask=attention, 
+        loss_mask=None, 
+        tau=torch.tensor([tau], device=device),
+        override_puzzle_emb=override_puzzle_emb
+    )
         test_logits = out["final_logits"][0, -tk.CANVAS_SIZE:]     # [900, 12]
         color_logits = test_logits[..., 2:12]                      # [900, 10]
         probs = F.softmax(color_logits, dim=-1)                    # [900, 10]
@@ -192,14 +199,17 @@ def predict_two_attempts(
     puzzle_len: int,
     device: str = "cpu",
     tau_schedule: Sequence[float] = TAU_SCHEDULE,
+    override_puzzle_emb: Optional[torch.Tensor] = None,
 ) -> Tuple[List[List[int]], List[List[int]]]:
     """Attempt 1: identity. Attempt 2: 180-degree rotation, then un-rotate."""
     a1 = predict_one_attempt(
-        model, task, puzzle_idx, n_train_pairs, puzzle_len, device, tau_schedule
+        model, task, puzzle_idx, n_train_pairs, puzzle_len, device, tau_schedule,
+        override_puzzle_emb=override_puzzle_emb
     )
     task_180 = _rot180_task(task)
     a2_rot = predict_one_attempt(
-        model, task_180, puzzle_idx, n_train_pairs, puzzle_len, device, tau_schedule
+        model, task_180, puzzle_idx, n_train_pairs, puzzle_len, device, tau_schedule,
+        override_puzzle_emb=override_puzzle_emb
     )
     a2 = _rot180_grid(a2_rot)
     return a1, a2

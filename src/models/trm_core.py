@@ -29,6 +29,33 @@ class SwiGLUFFN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
+class LoRALinear(nn.Module):
+    def __init__(self, original_layer: nn.Linear, r: int = 8, alpha: int = 16):
+        super().__init__()
+        self.original_layer = original_layer
+        self.r = r
+        self.alpha = alpha
+        self.scaling = alpha / r
+        
+        in_features = original_layer.in_features
+        out_features = original_layer.out_features
+        
+        # LoRA matrices
+        self.lora_A = nn.Parameter(torch.zeros(in_features, r))
+        self.lora_B = nn.Parameter(torch.zeros(r, out_features))
+        nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
+        nn.init.zeros_(self.lora_B)
+        
+        # Freeze the original weights
+        self.original_layer.weight.requires_grad = False
+        if self.original_layer.bias is not None:
+            self.original_layer.bias.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        result = self.original_layer(x)
+        lora_out = (x @ self.lora_A @ self.lora_B) * self.scaling
+        return result + lora_out
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, d_model: int = 512, n_heads: int = 8, ffn_dim: int = 1024):
@@ -198,27 +225,31 @@ class TRMModel(nn.Module):
         labels: Optional[torch.Tensor] = None,
         tbptt_window: int = 4,
         tau: Optional[torch.Tensor] = None,
+        override_puzzle_emb: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        x = self._embed_inputs(token_ids, puzzle_idx)
-
+        
+        if override_puzzle_emb is not None:
+            B = token_ids.shape[0]
+            if override_puzzle_emb.shape[0] != B:
+                override_puzzle_emb = override_puzzle_emb.expand(B, -1)
+            p_emb = override_puzzle_emb.view(B, self.puzzle_len, self.d_model)
+            x = self.token_embeddings(token_ids)
+            
+            pos = torch.arange(self.canvas_size, device=token_ids.device)
+            row = pos // self.canvas_w
+            col = pos % self.canvas_w
+            pos_emb = self.row_embeddings(row) + self.col_embeddings(col)
+            pos_emb = pos_emb.repeat(self.n_pairs * 2, 1)
+            x_canvas = x[:, self.puzzle_len:] + pos_emb.unsqueeze(0)
+            
+            x = torch.cat([p_emb, x_canvas], dim=1)
+        else:
+            x = self._embed_inputs(token_ids, puzzle_idx)
+            
         if tau is not None:
             tau_tensor = tau.float().unsqueeze(-1)
-            tau_emb = self.tau_embedding(tau_tensor).unsqueeze(1) # [B, 1, d_model]
-            x = x + tau_emb 
-
-        key_padding_mask = None
-        if attention_mask is not None:
-            key_padding_mask = ~attention_mask.bool()
-
-        if labels is None and loss_mask is not None:
-            labels = torch.where(loss_mask.bool(), token_ids, -100)
-
-        return self.forward_with_supervision(
-            input_embeddings=x,
-            labels=labels,
-            key_padding_mask=key_padding_mask,
-            tbptt_window=tbptt_window,
-        )
+            tau_emb = self.tau_embedding(tau_tensor).unsqueeze(1)
+            x = x + tau_emb
 
         key_padding_mask = None
         if attention_mask is not None:
